@@ -1,0 +1,108 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: order-config
+  namespace: store
+data:
+  SERVICE_NAME: order
+  PRODUCT_URL: http://product:8000
+  EXCHANGE_URL: http://exchange:8000
+  RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
+  ORDER_EVENTS_QUEUE: order.events
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order
+  namespace: store
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  strategy:
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector:
+    matchLabels: {app: order}
+  template:
+    metadata:
+      labels: {app: order}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: /metrics
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      terminationGracePeriodSeconds: 30
+      containers:
+      - name: order
+        image: microserv-store/order:local
+        imagePullPolicy: IfNotPresent
+        ports: [{containerPort: 8000, name: http}]
+        envFrom: [{configMapRef: {name: order-config}}]
+        env:
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef: {name: store-secrets, key: JWT_SECRET}
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef: {name: store-secrets, key: DATABASE_URL}
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {cpu: "1", memory: 256Mi}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+        volumeMounts: [{name: tmp, mountPath: /tmp}]
+        startupProbe:
+          httpGet: {path: /health-check, port: http}
+          failureThreshold: 60
+          periodSeconds: 2
+        readinessProbe:
+          httpGet: {path: /ready, port: http}
+          periodSeconds: 5
+        livenessProbe:
+          httpGet: {path: /health-check, port: http}
+          periodSeconds: 10
+      volumes: [{name: tmp, emptyDir: {}}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order
+  namespace: store
+spec:
+  type: ClusterIP
+  selector: {app: order}
+  ports: [{port: 8000, targetPort: http, name: http}]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: order
+  namespace: store
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: order}
+  minReplicas: 2
+  maxReplicas: 5
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 60
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target: {type: Utilization, averageUtilization: 60}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: order
+  namespace: store
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app: order}
