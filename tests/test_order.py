@@ -1,6 +1,7 @@
 import os
 import time
 import uuid
+import pytest
 
 os.environ["DATABASE_URL"] = "sqlite:///./test_order.db"
 os.environ["JWT_SECRET"] = "order-unit-test-secret-with-32-plus-bytes!!"
@@ -30,7 +31,8 @@ def make_token(sub: str | None = None) -> str:
     )
 
 
-def test_order_creation_isolation_conversion_and_async_messaging():
+def test_order_creation_isolation_conversion_and_async_messaging(monkeypatch):
+    monkeypatch.setenv("ENABLE_DEMO_CONTROLS", "true")
     p1_id = "0195abfb-7074-73a9-9d26-b4b9fbaab0a8"
     p2_id = "0195abfe-e416-7052-be3b-27cdaf12a984"
     products_db = {
@@ -170,3 +172,12 @@ def test_order_creation_isolation_conversion_and_async_messaging():
         broker.available = True
         drain_queue_once()
         assert client.get(f"/orders/{outage_order_id}/notifications", headers=auth1).json()["status"] == "PROCESSED"
+
+
+def test_global_consumer_control_is_disabled_without_explicit_opt_in(monkeypatch):
+    monkeypatch.delenv("ENABLE_DEMO_CONTROLS", raising=False)
+    monkeypatch.setattr(order_main, "set_consumer_enabled", lambda enabled: pytest.fail("Disabled control changed state"))
+    with TestClient(app) as client:
+        response = client.post("/orders/events/consumer", json={"enabled": False},
+                               headers={"Authorization": "Bearer " + make_token()})
+        assert response.status_code == 404

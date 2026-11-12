@@ -120,6 +120,17 @@ class InMemoryBroker:
         with self._lock:
             return len(self._queues[queue])
 
+    def consume_one(self, queue: str, processor: Callable[[str], None]) -> bool:
+        raw = self.get_one(queue)
+        if raw is None:
+            return False
+        try:
+            processor(raw)
+        except Exception:
+            self.publish(queue, raw)
+            raise
+        return True
+
 
 class RabbitMQBroker:
     def __init__(self, url: str):
@@ -144,10 +155,12 @@ class RabbitMQBroker:
         conn, ch = self._connect()
         try:
             ch.queue_declare(queue=queue, durable=True)
+            ch.confirm_delivery()
             ch.basic_publish(
                 exchange="",
                 routing_key=queue,
                 body=body.encode("utf-8"),
+                mandatory=True,
                 properties=pika.BasicProperties(
                     delivery_mode=2,
                     content_type="application/json",
@@ -156,14 +169,19 @@ class RabbitMQBroker:
         finally:
             conn.close()
 
-    def get_one(self, queue: str) -> Optional[str]:
+    def consume_one(self, queue: str, processor: Callable[[str], None]) -> bool:
         conn, ch = self._connect()
         try:
             method_frame, _header_frame, body = ch.basic_get(queue=queue, auto_ack=False)
             if method_frame is None:
-                return None
+                return False
+            try:
+                processor(body.decode("utf-8"))
+            except Exception:
+                ch.basic_nack(delivery_tag=method_frame.delivery_tag, requeue=True)
+                raise
             ch.basic_ack(delivery_tag=method_frame.delivery_tag)
-            return body.decode("utf-8")
+            return True
         finally:
             conn.close()
 
@@ -254,11 +272,8 @@ def process_single_event_message(raw_message: str) -> None:
         total_usd = float(payload.get("total_usd", 0.0))
     except Exception as exc:
         logger.error(json.dumps({"service": "order", "event": "invalid_event_payload", "error": str(exc)}))
-        try:
-            broker.publish(ORDER_EVENTS_DLQ, raw_message)
-            EVENTS_DLQ.inc()
-        except Exception:
-            pass
+        broker.publish(ORDER_EVENTS_DLQ, raw_message)
+        EVENTS_DLQ.inc()
         return
 
     with Session() as session:
@@ -320,13 +335,12 @@ def drain_queue_once(max_messages: int = 50) -> int:
     processed = 0
     for _ in range(max_messages):
         try:
-            raw = broker.get_one(ORDER_EVENTS_QUEUE)
+            consumed = broker.consume_one(ORDER_EVENTS_QUEUE, process_single_event_message)
         except Exception as exc:
             logger.warning(json.dumps({"service": "order", "event": "broker_consume_error", "error": str(exc)}))
             break
-        if raw is None:
+        if not consumed:
             break
-        process_single_event_message(raw)
         processed += 1
     return processed
 
@@ -491,6 +505,8 @@ def get_events_summary(account_id: str = Depends(identity)):
 
 @app.post("/orders/events/consumer")
 def control_consumer(body: ConsumerControlIn, _account_id: str = Depends(identity)):
+    if os.environ.get("ENABLE_DEMO_CONTROLS", "false").lower() != "true":
+        raise HTTPException(404, "Demo controls disabled")
     state = set_consumer_enabled(body.enabled)
     processed = drain_queue_once() if state else 0
     return {"consumer_active": state, "drained_messages": processed}
