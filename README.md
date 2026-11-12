@@ -17,6 +17,12 @@ Serviço de pedidos (`POST /orders`, `GET /orders`, `GET /orders/{id}`) em Pytho
 | `GET` | `/ready` | Público | Prontidão do banco e broker RabbitMQ |
 | `GET` | `/metrics` | Público (interno) | Métricas Prometheus |
 
+## Segurança e entrega de eventos
+
+O controle global `POST /orders/events/consumer` fica desabilitado por padrão (404). Para demonstração local controlada, habilitar explicitamente `ENABLE_DEMO_CONTROLS=true`; não habilitar em ambiente compartilhado com usuários reais. O replay de eventos continua restrito ao proprietário do pedido.
+
+A publicação usa confirmações do broker e `mandatory=True`. O consumidor confirma a entrega apenas após concluir a transação de notificação; falhas de processamento devolvem a mensagem à fila. O contrato é de entrega pelo menos uma vez, com consumidor idempotente, não de entrega exatamente uma vez.
+
 ## Regra de Conversão Monetária e Arredondamento
 
 - Todos os valores de pedidos e itens são persistidos no PostgreSQL em **USD** (`Numeric(12, 2)`).
